@@ -1,0 +1,98 @@
+input:
+  generate:
+    # Execute every 5. minute. CRON expressions can be used like: '0 */5 * * * *'
+    interval: '@every 5m'
+    # interval: '@every 1s'
+    # Generate empty trigger-message to start the pipeline
+    mapping: 'root = {}'
+
+pipeline:
+  processors:
+    - http:
+        url: ${OPENSEARCH_PROTOCOL}://${OPENSEARCH_HOST}:${OPENSEARCH_PORT}/uxmapp_confidential-*/_search
+        verb: POST
+        timeout: 30s
+
+        tls:
+          enabled: true
+          #root_cas_file: node-custom-ca.pem
+          skip_cert_verify: true
+
+        # Added Basic Authentication for Input
+        # failed to json unmarshal body: invalid character 'U' errors is due to Unauthorized being returned.
+        basic_auth:
+          enabled: true
+          username: "${OPENSEARCH_USER}"
+          password: "${OPENSEARCH_PASSWORD}"
+
+        headers:
+          Content-Type: application/json
+
+        # Send en Query DSL for at finde endpoints der skal opdateres
+        payload: |
+          {
+            "size": 10000,
+            "query": {
+              "bool": {
+                "filter": [
+                  { "range": { "@timestamp": { "gte": "now-15m", "lte": "now" } } },
+                  { "bool": { "should": [
+                    { "term": { "data_stream.dataset": "monitor.endpoint.info" } },
+                    { "term": { "data_stream.dataset": "endpoint.registration" } }
+                  ],
+                  "minimum_should_match": 1 }}
+                ]
+              }
+            }
+          }
+
+    # 2. Automatically prints the full JSON payload to your Docker stdout logs
+    #- log:
+    #    level: INFO
+    #    message: "Exporting OpenSearch. ID: ${! content() }"
+
+    # 3. Extract the hits array from the OpenSearch response root
+    - mapping: |
+        root = this.hits.hits
+
+    # 4. Split the JSON array into individual standalone messages
+    - unarchive:
+        format: json_array
+
+    # 5. Streamlined mapping executed on each individual split document
+    - mapping: |
+        # Store the OpenSearch host ID inside the metadata layer
+        meta host_id = this._source.host.id
+        
+        # TODO: Remove empty rows like hostname, internal_ip and incorrect country lookup.
+        # Some hosts didn't send these in older versions when WMI call failed.
+
+        # For updates/upserts, OpenSearch expects the payload to live inside a 'doc' key.
+        # We also map the exact same data to 'upsert', so if the document is brand new,
+        # it creates it natively.
+        root.doc = this._source
+        root.upsert = this._source
+
+output:
+  opensearch:
+    urls: [ "${OPENSEARCH_PROTOCOL}://${OPENSEARCH_HOST}:${OPENSEARCH_PORT}" ]
+
+    tls:
+      enabled: true
+      #root_cas_file: node-custom-ca.pem
+      skip_cert_verify: true
+
+    # Added Basic Authentication for Input
+    basic_auth:
+      enabled: true
+      username: "${OPENSEARCH_USER}"
+      password: "${OPENSEARCH_PASSWORD}"
+
+    batching:
+      count: 1000        # Send a bulk request as soon as 1,000 documents are ready
+      period: 5s         # If 1,000 items aren't reached, flush the bulk queue every 5 seconds
+      byte_size: 5242880 # Or flush if the bulk payload size reaches 5MB (5 * 1024 * 1024 bytes)
+      
+    index: "uxmapp-endpoints" # Destination summary table
+    id: '${! meta("host_id") }' # Uses the saved host.id as OpenSearch _id
+    action: "update"     # Executes the native upsert/merge

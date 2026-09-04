@@ -30,6 +30,28 @@ volumes:
     driver: local
 
 services:
+  bento:
+    image: ghcr.io/warpstreamlabs/bento:${BENTO_VERSION}
+    container_name: bento
+    pull_policy: always
+    command: ["-c", "/opt/bento/config.yaml", "streams", "/opt/bento/streams/*.yaml"]
+    volumes:
+      - ./docker-compose/bento/streams/:/opt/bento/streams
+      - ./docker-compose/bento/config.yaml:/opt/bento/config.yaml
+    networks:
+      - observability-stack-network
+    restart: unless-stopped
+    environment:
+      - OPENSEARCH_PROTOCOL=${OPENSEARCH_PROTOCOL}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST}
+      - OPENSEARCH_PORT=${OPENSEARCH_PORT}
+      - OPENSEARCH_USER=${OPENSEARCH_USER}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+        required: false
+
   # OpenTelemetry Collector - Receives telemetry data via OTLP protocol
   otel-collector:
     image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION}

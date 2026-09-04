@@ -1,0 +1,10 @@
+http:
+  address: 0.0.0.0:4195
+  root_path: /
+
+logger:
+  level: INFO
+  format: logfmt
+
+metrics:
+  prometheus: {}
