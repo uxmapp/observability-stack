@@ -1,0 +1,162 @@
+input:
+  generate:
+    # Execute every 5. minute. CRON expressions can be used like: '0 */5 * * * *'
+    interval: '* 0 * * * *'
+    # interval: '@every 1s'
+    # Generate empty trigger-message to start the pipeline
+    mapping: 'root = {}'
+
+pipeline:
+  processors:
+    - http:
+        url: ${OPENSEARCH_PROTOCOL}://${OPENSEARCH_HOST}:${OPENSEARCH_PORT}/uxmapp-endpoints/_search
+        verb: POST
+        timeout: 30s
+
+        tls:
+          enabled: true
+          #root_cas_file: node-custom-ca.pem
+          skip_cert_verify: true
+
+        # Added Basic Authentication for Input
+        # failed to json unmarshal body: invalid character 'U' errors is due to Unauthorized being returned.
+        basic_auth:
+          enabled: true
+          username: "${OPENSEARCH_USER}"
+          password: "${OPENSEARCH_PASSWORD}"
+
+        headers:
+          Content-Type: application/json
+
+        # Send DSL Query to find endpoints to lookup warranty on
+        # Select all endpoints where warranty is not checked
+        # Select endpoints where warranty was checked 31 days ago and no errors occured.
+        # Select endpoints where warranty was checked 7 days ago and errors occured.
+        payload: |
+          {
+            "_source": ["host.id", "host.name", "device.manufacturer", "device.serial_number", "host.warranty"],
+            "size": 10,
+            "query": {
+              "bool": {
+                "filter": [
+                  { "terms": { "device.manufacturer.keyword": [ "Dell Inc.", "Dell" ] } },
+                  { "exists": { "field": "device.serial_number" } },
+                  {
+                    "bool": {
+                      "minimum_should_match": 1,
+                      "should": [
+                        { "bool": { "must_not": [ { "exists": { "field": "host.warranty.checked" } } ] } },
+                        { "bool": { "filter": [
+                          { "range": { "host.warranty.checked": { "lte": "now-31d"
+                                  } } },
+                          { "term": { "host.warranty.error_message.keyword": "" } }
+                        ] } },
+                        { "bool": { "filter": [
+                          { "range": { "host.warranty.checked": { "lte": "now-7d" } } }
+                            ],
+                            "must_not": [ { "term": { "host.warranty.error_message.keyword": "" } } ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "must_not": [ { "term": { "device.serial_number.keyword": "" } } ]
+              }
+            },
+            "sort": [ { "@timestamp": { "order": "desc" } } ]
+          }
+
+    # 3. Extract the hits array from the OpenSearch response root
+    - mapping: |
+        root = this.hits.hits
+
+    # 4. Split the JSON array into individual standalone messages
+    - unarchive:
+        format: json_array
+    # 5. Re-batch the stream into groups of up to 10 messages (or flush if 1s passes)
+    #- batch:
+    #    count: 10
+    #    period: 5s
+
+    # 6. Transform the 10-message batch into a single string of comma-separated tags
+    #- mapping: |
+    #    meta service_tags = json("_source.device.serial_number").from_all().join(",")
+
+    # 2. Automatically prints the full JSON payload to your Docker stdout logs
+    #- log:
+    #    level: INFO
+    #    message: 'Lookup Warranty ID: ${! meta("service_tags") } ${! content() }'
+
+    # 2. Automatically prints the full JSON payload to your Docker stdout logs
+    - log:
+        level: INFO
+        message: 'Lookup Warranty ID: ${! json("_source.device.serial_number") } ${! content() }'
+
+    # 5. Use branch to execute the HTTP request without deleting the original context (like host.id)
+    - resource: dell_api_processor
+    
+    # 5. Streamlined mapping executed on each individual split document
+    - mapping: |
+        # Store the OpenSearch host ID inside the metadata layer
+        meta host_id = this._source.host.id
+        
+        # Since Dell returns a JSON array [ ... ], extract the first object element safely
+        let dell_obj = this.tmp_dell.index(0).catch(null)
+        let entitlements = $dell_obj.entitlements.catch([])
+
+         # Sort the extracted endDate strings and handle cases where the array is empty.
+        let latest_date = $entitlements.map_each(item -> item.endDate).sort().index(-1).or(null)
+
+        # Pull high-level attributes using .or() to catch missing payload objects
+        let countryCode  = $dell_obj.countryCode.or("UNKNOWN")
+        let shipDate  = $dell_obj.shipDate.or(null)
+
+        # Capture current time when the check was executed
+        let check_done = now().ts_format("2006-01-02T15:04:05Z", "UTC")
+
+        # Calculate next check date:
+        # 1. Grab current time object with now()
+        # 2. Get the Unix epoch numeric value with .ts_unix()
+        # 3. Add 31 days in seconds (31 days * 24 hours * 60 mins * 60 secs = 2,678,400)
+        # 4. Turn it back into a standard ISO 8601 string format via .ts_format()
+        #let next_check = now().ts_unix().add(2678400).ts_format("2006-01-02T15:04:05Z", "UTC")
+
+        # Capture API or lookup errors natively
+        let api_error = error().catch("")
+
+        # For updates/upserts, OpenSearch expects the payload to live inside a 'doc' key.
+        # We also map the exact same data to 'upsert', so if the document is brand new,
+        # it creates it natively.
+        root.doc.host.warranty.geo.country_iso_code = $countryCode
+        root.doc.host.warranty.start = $shipDate
+        # root.doc.host.warranty.shipped = $shipDate
+        root.doc.host.warranty.end = $latest_date
+        root.doc.host.warranty.checked = $check_done
+        #root.doc.host.warranty.next_check = $next_check
+        root.doc.host.warranty.error_message = api_error
+        root.upsert.host.warranty = root.doc.host.warranty
+
+output:
+  opensearch:
+    urls: [ "${OPENSEARCH_PROTOCOL}://${OPENSEARCH_HOST}:${OPENSEARCH_PORT}" ]
+
+    tls:
+      enabled: true
+      #root_cas_file: node-custom-ca.pem
+      skip_cert_verify: true
+
+    # Added Basic Authentication for Input
+    basic_auth:
+      enabled: true
+      username: "${OPENSEARCH_USER}"
+      password: "${OPENSEARCH_PASSWORD}"
+
+    batching:
+      count: 1000        # Send a bulk request as soon as 1,000 documents are ready
+      period: 5s         # If 1,000 items aren't reached, flush the bulk queue every 5 seconds
+      byte_size: 5242880 # Or flush if the bulk payload size reaches 5MB (5 * 1024 * 1024 bytes)
+
+    index: "uxmapp-endpoints" # Destination summary table
+    id: '${! meta("host_id") }' # Uses the saved host.id as OpenSearch _id
+    action: "update"     # Executes the native upsert/merge

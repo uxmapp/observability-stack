@@ -1,0 +1,29 @@
+
+# 1. Define the Rate Limiter resource at the root level
+# Use resource_templates to make the resource global available for all stream-files
+rate_limit_resources:
+  - label: api_rate_limiter
+    type: local
+    local:
+      # 1 request per second = 60 requests per minute
+      count: 60
+      interval: 60s
+
+# 2. Define the processor-resourse that uses rate-limiter
+# Use in stream processor with - resource: dell_api_processor
+processor_resources:
+  - label: dell_api_processor
+    branch:
+        processors:
+          - http:
+              url: 'https://apigtwb2c.us.dell.com/PROD/sbil/eapi/v5/asset-entitlements?servicetags=${! json("_source.device.serial_number") }'
+              verb: GET
+              rate_limit: api_rate_limiter
+              #dump_request_log_level: INFO
+              oauth2:
+                enabled: true
+                token_url: https://apigtwb2c.us.dell.com/auth/oauth/v2/token
+                client_key: "${DELL_CLIENT_ID}"
+                client_secret: "${DELL_CLIENT_SECRET}"
+        # Save the API array response into a temporary working variable
+        result_map: 'root.tmp_dell = this'
