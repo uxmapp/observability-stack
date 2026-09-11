@@ -34,10 +34,11 @@ services:
     image: ghcr.io/warpstreamlabs/bento:${BENTO_VERSION}
     container_name: bento
     pull_policy: always
-    command: ["-c", "/opt/bento/config.yaml", "streams", "/opt/bento/streams/*.yaml"]
+    command: ["-c", "/opt/bento/config.yaml", "-r", "/opt/bento/resources.yaml", "streams", "/opt/bento/streams/*.yaml"]
     volumes:
       - ./docker-compose/bento/streams/:/opt/bento/streams
       - ./docker-compose/bento/config.yaml:/opt/bento/config.yaml
+      - ./docker-compose/bento/resources.yaml:/opt/bento/resources.yaml
     networks:
       - observability-stack-network
     restart: unless-stopped
@@ -47,6 +48,8 @@ services:
       - OPENSEARCH_PORT=${OPENSEARCH_PORT}
       - OPENSEARCH_USER=${OPENSEARCH_USER}
       - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - DELL_CLIENT_ID={DELL_CLIENT_ID}
+      - DELL_CLIENT_SECRET=${DELL_CLIENT_SECRET}
     depends_on:
       opensearch:
         condition: service_healthy
