@@ -31,7 +31,7 @@ pipeline:
         # Send en Query DSL for at finde endpoints der skal opdateres
         payload: |
           {
-            "_source": ["host.id","user.domain","user.name","user.email","user.hash"],
+            "_source": ["host.id","user.domain","user.name","user.email","user.upn","user.hash"],
             "size": 10000,
             "query": {
               "bool": {
