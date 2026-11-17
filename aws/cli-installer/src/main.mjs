@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { parseCli, applyQuickDefaults, validateConfig, fillDryRunPlaceholders } from './cli.mjs';
 import { renderPipeline } from './render.mjs';
+import { configureAwsProfile } from './aws-profile.mjs';
 import {
   checkRequirements,
   createOpenSearch,
@@ -37,6 +38,8 @@ export async function run() {
       const { startRepl } = await import('./repl.mjs');
       return startRepl();
     }
+
+    cfg.profile = configureAwsProfile(cfg.profile);
 
     // Destroy subcommand
     if (cfg._command === 'destroy') {
@@ -95,6 +98,7 @@ export async function run() {
  * Shared by the CLI path (main.mjs) and the REPL create command.
  */
 export async function executePipeline(cfg) {
+  cfg.profile = configureAwsProfile(cfg.profile);
   await checkRequirements(cfg);
 
   // Live VPC validation — verify the VPC/subnets/SGs exist, belong together, and
@@ -246,18 +250,21 @@ function printSummary(cfg) {
     ['Mode', cfg.mode],
     ['Pipeline name', cfg.pipelineName],
     ['Region', cfg.region],
+    ['AWS profile', cfg.profile || 'default credential chain'],
   ];
 
   // OpenSearch
   const osEntries = [];
   if (cfg.opensearchType === 'serverless') {
-    osEntries.push(['Type', 'Serverless (AOSS)']);
+    osEntries.push(['Type', 'Serverless (AOSS) NextGen time series']);
     if (cfg.osAction === 'reuse') {
       osEntries.push(['Action', 'reuse existing collection']);
       osEntries.push(['Endpoint', cfg.opensearchEndpoint]);
     } else {
-      osEntries.push(['Action', 'create new AOSS collection']);
+      osEntries.push(['Action', 'create new time series collection']);
       osEntries.push(['Collection name', cfg.aossCollectionName]);
+      osEntries.push(['Collection group', cfg.aossCollectionGroupName || '<collection>-cg']);
+      osEntries.push(['Group OCU (indexing, search)', `${cfg.aossMinOcu} to ${cfg.aossMaxOcu}`]);
     }
   } else if (cfg.osAction === 'reuse') {
     osEntries.push(['Action', 'reuse existing']);

@@ -1,0 +1,221 @@
+---
+title: "eBPF Instrumentation (OBI)"
+description: "Collect traces and RED metrics from unmodified services with OpenTelemetry eBPF Instrumentation, and get them on the Application Map"
+---
+
+[OpenTelemetry eBPF Instrumentation](https://opentelemetry.io/docs/zero-code/obi/) (OBI, formerly Grafana Beyla) generates spans and RED metrics for HTTP/S, HTTP/2, gRPC, Kafka, and database calls (PostgreSQL, MySQL, Redis, and others) by attaching eBPF probes to running processes. No SDK, agent, or restart is needed in the service. OBI exports OTLP to the observability stack's OTel Collector, so its spans land in `otel-v1-apm-span-*` and show up on the [Application Map](/docs/apm/service-map/) like any other trace data.
+
+Use OBI for services you can't or don't want to instrument with an SDK: legacy services, third-party binaries, or a fleet where code changes are slow to roll out. Services that already run an OTel SDK keep their SDK spans; by default OBI stops instrumenting any process it sees publishing its own OTel telemetry.
+
+:::tip[Upstream documentation]
+For the full configuration reference, supported protocols, and runtimes, see the [OBI documentation](https://opentelemetry.io/docs/zero-code/obi/).
+:::
+
+## Prerequisites
+
+- Linux kernel 5.8+ with BTF enabled (`/sys/kernel/btf/vmlinux` exists). See [OBI compatibility](https://opentelemetry.io/docs/zero-code/obi/#compatibility).
+- Privileged containers, with access to the host PID namespace and host network.
+- The observability stack running with the OTel Collector accepting OTLP on port 4318 (HTTP) or 4317 (gRPC).
+
+## Turn on context propagation
+
+The Application Map draws an edge from service A to service B only when B's SERVER span is a child of A's CLIENT span. That parent link comes from the W3C `traceparent` header that A sends to B. OBI injects `traceparent` into outgoing requests, but context propagation is disabled by default. Without it, every downstream call starts a new trace, the called services show up as isolated nodes, and callers that only make outgoing calls drop off the map.
+
+Set it to `all` in every OBI deployment:
+
+| Setting | Value |
+|---------|-------|
+| Environment variable | `OTEL_EBPF_BPF_CONTEXT_PROPAGATION=all` |
+| Config file | `ebpf.context_propagation: all` |
+
+`all` enables both HTTP header and TCP-level propagation. `headers` uses HTTP headers only. See [Distributed traces](https://opentelemetry.io/docs/zero-code/obi/distributed-traces/) for how each mode works.
+
+```mermaid
+flowchart LR
+    subgraph N1[Node 1]
+        FE[frontend]
+        OBI1[OBI]
+    end
+    subgraph N2[Node 2]
+        BE[backend]
+        OBI2[OBI]
+    end
+    FE -->|"HTTP + traceparent"| BE
+    OBI1 -.->|eBPF probes| FE
+    OBI2 -.->|eBPF probes| BE
+    OBI1 e1@-->|OTLP| COL[OTel Collector]
+    OBI2 e2@-->|OTLP| COL
+    COL e3@-->|OTLP| DP[Data Prepper]
+    DP e4@--> OS[(OpenSearch)]
+    e1@{ animation: slow }
+    e2@{ animation: slow }
+    e3@{ animation: slow }
+    e4@{ animation: slow }
+    linkStyle 3,4,5,6 stroke:#a3e635,stroke-width:2px
+```
+
+## Kubernetes (Helm)
+
+Install the upstream [`opentelemetry-ebpf-instrumentation`](https://github.com/open-telemetry/opentelemetry-helm-charts/tree/main/charts/opentelemetry-ebpf-instrumentation) chart as a DaemonSet next to the observability stack. Save the following as `obi-values.yaml`. Replace `my-apps` with the namespaces to instrument, and the endpoint with your collector Service. The example matches the [Kubernetes install](/docs/deploy/kubernetes/), which creates `obs-opentelemetry-collector` in the `default` namespace:
+
+```yaml
+config:
+  data:
+    ebpf:
+      context_propagation: all
+    discovery:
+      instrument:
+        - k8s_namespace: my-apps   # glob, e.g. "{shop,payments}"
+    attributes:
+      kubernetes:
+        enable: true
+    otel_traces_export:
+      endpoint: http://obs-opentelemetry-collector.default.svc.cluster.local:4318
+    otel_metrics_export:
+      endpoint: http://obs-opentelemetry-collector.default.svc.cluster.local:4318
+```
+
+```bash
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm install obi open-telemetry/opentelemetry-ebpf-instrumentation \
+  --namespace obi --create-namespace \
+  --version 0.14.3 \
+  -f obi-values.yaml
+```
+
+The chart runs OBI privileged with `hostPID` and `hostNetwork`. With `contextPropagation.enabled: true` (the chart default) it also mounts `/sys/fs/cgroup` and `/sys/kernel/tracing` and adds `NET_ADMIN`. `contextPropagation.enabled` only grants those permissions; the `context_propagation: all` line in the config is what turns injection on.
+
+Select namespaces whose services have no OTel SDK, and leave out the namespace the observability stack runs in. Otherwise OBI traces OpenSearch, Cortex, and the exporters, and every span OBI writes produces more spans. See [Services instrumented with an OTel SDK](#known-limitations) for why mixing OBI and SDK services in one selector produces duplicates.
+
+If you deploy OBI with your own manifests instead of the chart, mount `/sys/kernel/tracing` from the host. See [Linux kernel and node requirements](#linux-kernel-and-node-requirements).
+
+## Add OBI to a running cluster
+
+OBI attaches to processes that are already running, so adding it doesn't require redeploying or restarting the services it instruments. Install the chart as shown above into a cluster where the services are already serving traffic:
+
+- OBI attaches to the matching processes within about 10 to 20 seconds of the OBI pod starting. Calls made after that carry `traceparent`, and linked traces show up on the [Application Map](/docs/apm/service-map/) once Data Prepper flushes them.
+- Go services, and services that open a new connection per request, link from the first call after OBI attaches.
+- On kernels before 6.4, non-Go services that reuse a pooled connection opened before OBI attached keep sending calls without `traceparent`. See [Restart non-Go workloads on Linux kernels before 6.4](#restart-non-go-workloads-on-linux-kernels-before-64).
+
+To remove OBI, run `helm uninstall obi -n obi`, or, if you enabled it through the observability-stack chart, `helm upgrade` with `obi.enabled=false`. OBI's eBPF programs detach with the DaemonSet; the instrumented services keep running unchanged, and traces return to what they were before OBI.
+
+## Docker Compose
+
+Add OBI as a service next to the stack. OBI needs host network access for context propagation, so it runs with `network_mode: host` and sends OTLP to the collector port published on the host:
+
+```yaml
+services:
+  obi:
+    image: otel/ebpf-instrument:v0.14.0
+    privileged: true
+    pid: host
+    network_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup
+      - /sys/kernel/security:/sys/kernel/security
+      - /sys/kernel/tracing:/sys/kernel/tracing
+    environment:
+      OTEL_EBPF_BPF_CONTEXT_PROPAGATION: all
+      OTEL_EBPF_AUTO_TARGET_EXE: "*/my-service"   # or OTEL_EBPF_OPEN_PORT: "8080-8089"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+```
+
+Select which processes to instrument with `OTEL_EBPF_AUTO_TARGET_EXE` (executable path glob) or `OTEL_EBPF_OPEN_PORT` (listening ports). For multiple selectors, use a config file with a `discovery.instrument` list; see [Service discovery](https://opentelemetry.io/docs/zero-code/obi/configure/service-discovery/).
+
+OBI takes each service name from the process's `OTEL_SERVICE_NAME` environment variable. On Kubernetes it falls back to the `app.kubernetes.io/name` Pod label, then to the owning Deployment, StatefulSet, or DaemonSet name. See [Override service name and namespace](https://opentelemetry.io/docs/zero-code/obi/configure/service-discovery/#override-service-name-and-namespace).
+
+## Example: OBI with the OpenTelemetry Demo
+
+The stack ships an optional example that puts four services with no OTel SDK into the [OpenTelemetry Demo](/docs/get-started/quickstart/otel-demo/)'s shipping path. The OpenTelemetry Demo's `shipping` service calls `rate-gateway` (Go) instead of `quote`, and `rate-gateway` calls `carrier-rates` (Java), `fuel-surcharge` (Python), which calls `zone-lookup` (Go), and then forwards the request to `quote`. OBI traces the four new services, and the OpenTelemetry Demo's SDKs trace the rest, so a checkout trace crosses SDK and eBPF spans in both directions.
+
+```mermaid
+flowchart LR
+    checkout["checkout (SDK)"] --> shipping["shipping (SDK)"]
+    shipping --> rg["rate-gateway (Go, OBI)"]
+    rg --> cr["carrier-rates (Java, OBI)"]
+    rg --> fs["fuel-surcharge (Python, OBI)"]
+    fs --> zl["zone-lookup (Go, OBI)"]
+    rg --> quote["quote (SDK)"]
+```
+
+Kubernetes: install with the bundled values file, which enables OBI, the demo services, and the OpenTelemetry Demo, and points `shipping` at `rate-gateway`:
+
+```bash
+helm install obs-stack charts/observability-stack -f charts/observability-stack/values-ebpf-demo.yaml
+```
+
+Use the release name `obs-stack`: the chart's OpenTelemetry Demo values send its telemetry to `obs-stack-opentelemetry-collector`.
+
+With the [EKS Terraform module](/docs/deploy/kubernetes/#eks-deployment), set `enable_otel_demo = true` and `enable_ebpf_demo = true`.
+
+For a complete Helm configuration to copy from, see [`values-ebpf-demo.yaml`](https://github.com/opensearch-project/observability-stack/blob/main/charts/observability-stack/values-ebpf-demo.yaml) and the `obi:` block in the chart's [`values.yaml`](https://github.com/opensearch-project/observability-stack/blob/main/charts/observability-stack/values.yaml), which add an image digest pin, resource limits, a pod-label selector, and no Prometheus host port.
+
+Docker Compose (Linux hosts only): set these in `.env`, then run `docker compose up -d`:
+
+```bash
+INCLUDE_COMPOSE_OTEL_DEMO=docker-compose.otel-demo.yml
+INCLUDE_COMPOSE_EBPF_DEMO=docker-compose.ebpf-demo.yml
+INSTALL_EBPF_EXAMPLE_DASHBOARD=true
+```
+
+With the example enabled, the stack also creates an **OBI example services (eBPF metrics)** dashboard from OBI's own metrics: requests per minute, p95 server latency, p95 outgoing call latency by caller and target, and 5xx responses per service.
+
+## Verify
+
+Open **Observability** > **Application Monitoring** > **Application Map** and look for edges between the services OBI instruments. To list OBI spans directly, run this PPL query in **Discover** > **Traces**:
+
+```sql
+source = otel-v1-apm-span-*
+| where `resource.attributes.telemetry.distro.name` = 'opentelemetry-ebpf-instrumentation'
+| stats count() by serviceName, kind
+```
+
+Each instrumented service should have both `SPAN_KIND_SERVER` spans and, if it calls other services, `SPAN_KIND_CLIENT` spans.
+
+## Linux kernel and node requirements
+
+### Mount `/sys/kernel/tracing` on recent Linux kernels
+
+Kernels 6.6.128+, 6.12.75+, 6.18.14+, and 6.19+ include a socket change that OBI works around with an extra eBPF probe. That probe needs tracefs. If `/sys/kernel/tracing` isn't mounted into the OBI container, OBI logs `context propagation is disabled` at startup and stops injecting `traceparent` for non-Go services. Go services still propagate, so the map looks partly right. The Amazon Linux 2023 EKS AMI for Kubernetes 1.34 ships kernel 6.12 and is affected; the 1.32 AMI ships kernel 6.1 and isn't. Check with `kubectl get nodes -o wide`. See [OBI #3076](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3076).
+
+The Helm chart mounts tracefs when `contextPropagation.enabled` is true. For Compose or your own manifests, add the mount shown above. With the mount in place, OBI logs `FIONREAD compensation verified`.
+
+### Restart non-Go workloads on Linux kernels before 6.4
+
+On kernels before 6.4, OBI can't pick up TCP connections that were opened before it attached to a process, and logs `TCP socket iterator disabled` at startup. A non-Go service that reuses a pooled keep-alive connection, such as Java's `HttpClient`, sends no `traceparent` on that connection for as long as the connection stays open. Go services and services that open a new connection per request aren't affected.
+
+This happens in three cases:
+
+- OBI is installed while the service is already running.
+- OBI restarts or is upgraded.
+- A new pod starts receiving traffic before OBI attaches to it, which takes about 10 seconds. This applies to every rollout and scale-out, not only the first install. Under steady traffic, a plain `kubectl rollout restart` doesn't fix it, because the new pod opens its pooled connection before OBI attaches.
+
+To avoid it, delay readiness on non-Go services that make outgoing calls until OBI has attached, for example with a readiness probe that waits 20 seconds:
+
+```yaml
+readinessProbe:
+  tcpSocket:
+    port: 8080
+  initialDelaySeconds: 20
+```
+
+Then roll the workload so its pods restart behind the delay. Nodes on kernel 6.4 or later don't need this: on kernel 6.12, OBI picked up existing connections both at install and after a DaemonSet restart.
+
+### Test across nodes
+
+When both ends of a call run on the same host, one OBI instance sees both the outgoing and incoming request and links them without a header. A single-node test can show a complete map with context propagation off. Test on at least two nodes before relying on the map.
+
+## Known limitations
+
+| Case | Behavior |
+|------|----------|
+| Non-Go services over HTTPS or mTLS (tested with Java and Python) | Doesn't link across nodes. OBI can't write the header into TLS-encrypted traffic from these runtimes, and the TCP-level fallback didn't link cross-node calls in testing. Those edges are missing from the map. |
+| Services instrumented with an OTel SDK | `discovery.exclude_otel_instrumented_services` (default `true`) tells OBI to skip processes that publish their own telemetry, but it doesn't catch every SDK. With OBI selecting the OpenTelemetry Demo namespace, Python and C++ services kept both SDK and OBI spans 8 minutes after OBI started. Scope OBI's selectors to workloads without an SDK. Calls between OBI and SDK services link in both directions; SDK services read OBI's `Traceparent` header case-insensitively. |
+| Data Prepper 2.16.0 and earlier | A service that only makes outgoing calls appears on the map only if at least one of its calls resolves to an edge. Without context propagation, those callers disappear. |
+
+## Related links
+
+- [Auto-Instrumentation](/docs/send-data/opentelemetry/auto-instrumentation/) for SDK-based zero-code agents
+- [Application Map](/docs/apm/service-map/)
+- [OBI configuration reference](https://opentelemetry.io/docs/zero-code/obi/configure/options/)
+- [OBI distributed traces](https://opentelemetry.io/docs/zero-code/obi/distributed-traces/)

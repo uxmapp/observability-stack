@@ -18,6 +18,24 @@ ALERTMANAGER_PORT = os.getenv("ALERTMANAGER_PORT", "9093")
 _opensearch_protocol = os.getenv("OPENSEARCH_PROTOCOL", "https")
 OPENSEARCH_ENDPOINT = f"{_opensearch_protocol}://{os.getenv('OPENSEARCH_HOST', 'opensearch')}:{os.getenv('OPENSEARCH_PORT', '9200')}"
 ISM_RETENTION_DAYS = int(os.getenv("ISM_RETENTION_DAYS", "7"))
+INSTALL_EBPF_EXAMPLE_DASHBOARD = os.getenv(
+    "INSTALL_EBPF_EXAMPLE_DASHBOARD", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+INSTALL_VISUALIZATION_SAMPLES = os.getenv(
+    "INSTALL_VISUALIZATION_SAMPLES", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+DEMO_DASHBOARD_PATHS = (
+    "/config/demo-dashboards/viz-demo-bar-and-pie.ndjson",
+    "/config/demo-dashboards/viz-demo-dashboard-variables.ndjson",
+    "/config/demo-dashboards/viz-demo-data-transformation.ndjson",
+    "/config/demo-dashboards/viz-demo-gauges.ndjson",
+    "/config/demo-dashboards/viz-demo-heatmap-and-scatter.ndjson",
+    "/config/demo-dashboards/viz-demo-histogram.ndjson",
+    "/config/demo-dashboards/viz-demo-metric-charts.ndjson",
+    "/config/demo-dashboards/viz-demo-state-timeline.ndjson",
+    "/config/demo-dashboards/viz-demo-thresholds.ndjson",
+    "/config/demo-dashboards/viz-demo-time-series.ndjson",
+)
 
 
 def _ism_policy(policy_id, description, index_patterns, rollover_size, retention_days):
@@ -179,6 +197,77 @@ def create_workspace():
         return "default"
 
 
+def ensure_sample_data(workspace_id, sample_data_id):
+    """Ensure a built-in sample dataset is ready and return its index-pattern ID."""
+    if workspace_id and workspace_id != "default":
+        api_base_url = f"{BASE_URL}/w/{workspace_id}"
+    else:
+        api_base_url = BASE_URL
+
+    headers = {"osd-xsrf": "true"}
+    try:
+        response = requests.get(
+            f"{api_base_url}/api/sample_data",
+            auth=(USERNAME, PASSWORD),
+            headers=headers,
+            verify=False,
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Could not inspect sample data ({response.status_code}): "
+                f"{response.text[:200]}"
+            )
+
+        sample_data = next(
+            (
+                dataset
+                for dataset in response.json()
+                if dataset.get("id") == sample_data_id
+            ),
+            None,
+        )
+        if sample_data is None:
+            raise RuntimeError(
+                f"OpenSearch Dashboards does not provide sample dataset "
+                f"'{sample_data_id}'"
+            )
+        default_index = sample_data.get("defaultIndex")
+        if not default_index:
+            raise RuntimeError(
+                f"Sample dataset '{sample_data_id}' has no default index pattern"
+            )
+        status = sample_data.get("status")
+        if status == "installed":
+            print(f"✅ Sample data already installed: {sample_data_id}")
+            return default_index
+        if status != "not_installed":
+            raise RuntimeError(
+                f"Could not determine whether sample dataset '{sample_data_id}' "
+                f"is installed (status: {status})"
+            )
+
+        print(f"📦 Installing sample data: {sample_data_id}...")
+        response = requests.post(
+            f"{api_base_url}/api/sample_data/{sample_data_id}",
+            auth=(USERNAME, PASSWORD),
+            headers=headers,
+            verify=False,
+            timeout=120,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Sample data installation failed ({response.status_code}): "
+                f"{response.text[:200]}"
+            )
+        print(f"✅ Installed sample data: {sample_data_id}")
+        return default_index
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(
+            f"Error ensuring sample data '{sample_data_id}': {e}"
+        ) from e
+
+
 def get_existing_index_pattern(workspace_id, title):
     """Check if an index pattern with the given title already exists"""
     try:
@@ -214,27 +303,60 @@ def create_index_pattern(
     workspace_id, title, time_field=None, signal_type=None, schema_mappings=None,
     display_name=None
 ):
-    """Create index pattern in workspace and return its ID"""
+    """Create or reconcile an index pattern and return its ID."""
+    metadata = {}
+    if time_field is not None:
+        metadata["timeFieldName"] = time_field
+    if signal_type is not None:
+        metadata["signalType"] = signal_type
+    if schema_mappings is not None:
+        metadata["schemaMappings"] = schema_mappings
+    if display_name is not None:
+        metadata["displayName"] = display_name
+
     # Check if index pattern already exists
     existing_id = get_existing_index_pattern(workspace_id, title)
     if existing_id:
         print(f"✅ Index pattern already exists: {title}")
+        if not metadata:
+            return existing_id
+
+        if workspace_id and workspace_id != "default":
+            update_url = (
+                f"{BASE_URL}/w/{workspace_id}/api/saved_objects/"
+                f"index-pattern/{existing_id}"
+            )
+        else:
+            update_url = (
+                f"{BASE_URL}/api/saved_objects/index-pattern/{existing_id}"
+            )
+
+        try:
+            response = requests.put(
+                update_url,
+                auth=(USERNAME, PASSWORD),
+                headers={"Content-Type": "application/json", "osd-xsrf": "true"},
+                json={"attributes": metadata},
+                verify=False,
+                timeout=10,
+            )
+            if response.status_code == 200:
+                print(f"✅ Updated index pattern metadata: {title}")
+            else:
+                print(
+                    f"⚠️  Failed to update index pattern metadata for {title}: "
+                    f"{response.status_code}"
+                )
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️  Error updating index pattern {title}: {e}")
         return existing_id
 
     payload = {
         "attributes": {
-            "title": title
+            "title": title,
+            **metadata,
         }
     }
-
-    if time_field:
-        payload["attributes"]["timeFieldName"] = time_field
-    if signal_type:
-        payload["attributes"]["signalType"] = signal_type
-    if schema_mappings:
-        payload["attributes"]["schemaMappings"] = schema_mappings
-    if display_name:
-        payload["attributes"]["displayName"] = display_name
 
     # Use workspace-specific URL if workspace exists, otherwise use default
     if workspace_id and workspace_id != "default":
@@ -1629,6 +1751,21 @@ def _create_saved_object_directly(workspace_id, obj):
         return False
 
 
+def _rewrite_mapped_ids(value, id_mappings):
+    """Rewrite exported IDs in saved-object attributes, including JSON strings."""
+    if isinstance(value, dict):
+        return {
+            key: _rewrite_mapped_ids(item, id_mappings)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_rewrite_mapped_ids(item, id_mappings) for item in value]
+    if isinstance(value, str):
+        for old_id, new_id in id_mappings.items():
+            value = value.replace(old_id, new_id)
+    return value
+
+
 def import_ndjson_dashboard(workspace_id, ndjson_path, id_mappings=None):
     """Import a dashboard and its dependencies from an ndjson export file.
 
@@ -1677,8 +1814,13 @@ def import_ndjson_dashboard(workspace_id, ndjson_path, id_mappings=None):
         # Remove version field that can cause conflicts on import
         obj.pop("version", None)
 
-        # Rewrite references to point at the live index-pattern IDs
+        # Rewrite references and serialized attribute content to point at live
+        # index-pattern IDs. Dashboard variables keep their dataset inside
+        # variablesJSON rather than the standard saved-object references array.
         if id_mappings:
+            obj["attributes"] = _rewrite_mapped_ids(
+                obj.get("attributes", {}), id_mappings
+            )
             for ref in obj.get("references", []):
                 if ref.get("id") in id_mappings:
                     ref["id"] = id_mappings[ref["id"]]
@@ -1727,6 +1869,27 @@ def import_ndjson_dashboard(workspace_id, ndjson_path, id_mappings=None):
 
     print(f"✅ Imported {total_success} saved objects from {os.path.basename(ndjson_path)}")
     return total_success
+
+
+def install_visualization_samples(workspace_id, logs_pattern_id, id_mappings):
+    """Install optional sample data and dashboards without blocking core setup."""
+    try:
+        flights_pattern_id = ensure_sample_data(workspace_id, "flights")
+    except RuntimeError as e:
+        print(
+            "⚠️  Could not prepare optional visualization samples; "
+            f"continuing core initialization: {e}"
+        )
+        return False
+
+    if logs_pattern_id:
+        id_mappings["85c9f700-905d-11f1-8e13-1fc52a695474"] = logs_pattern_id
+    id_mappings["d3d7af60-4c81-11e8-b3d7-01146121b73d"] = flights_pattern_id
+
+    for dashboard_path in DEMO_DASHBOARD_PATHS:
+        import_ndjson_dashboard(workspace_id, dashboard_path, id_mappings)
+
+    return True
 
 
 def main():
@@ -1815,6 +1978,21 @@ def main():
     # SDK-language variables; reuses the logs/span/service-map index patterns and
     # the ObservabilityStack_Prometheus datasource created above.
     import_ndjson_dashboard(workspace_id, "/config/dashboard-astronomy-service-telemetry.ndjson", ndjson_id_mappings)
+    # eBPF example: OBI HTTP metrics for the example services. Only when the eBPF example is enabled.
+    if INSTALL_EBPF_EXAMPLE_DASHBOARD:
+        import_ndjson_dashboard(workspace_id, "/config/dashboard-ebpf-example.ndjson", ndjson_id_mappings)
+
+    if INSTALL_VISUALIZATION_SAMPLES:
+        # Visualization demos reuse the live logs pattern, the Prometheus
+        # datasource, and OpenSearch Dashboards' built-in Flights sample data.
+        install_visualization_samples(
+            workspace_id, logs_pattern_id, ndjson_id_mappings
+        )
+    else:
+        print(
+            "⏭️  INSTALL_VISUALIZATION_SAMPLES=false, skipping Flights data "
+            "and bundled visualization samples"
+        )
 
     # Create saved queries for common agent observability patterns
     create_default_saved_queries(workspace_id)
