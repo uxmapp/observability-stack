@@ -2,7 +2,7 @@
 
 # 🔭 OpenSearch Observability Stack
 
-[![E2E Tests](https://github.com/opensearch-project/observability-stack/actions/workflows/e2e.yml/badge.svg)](https://github.com/opensearch-project/observability-stack/actions/workflows/e2e.yml)
+[![E2E Tests](https://github.com/uxmapp/observability-stack/actions/workflows/e2e.yml/badge.svg)](https://github.com/uxmapp/observability-stack/actions/workflows/e2e.yml)
 
 Observability Stack is an open-source stack designed for modern distributed systems. Built on OpenTelemetry, OpenSearch, and Prometheus, Observability Stack provides a complete, pre-configured infrastructure for monitoring microservices, web applications, and AI agents—with first-class support for agent observability through [OpenTelemetry Gen-AI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
 
@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/bef4c3ad-c64d-4db8-96f5-9ffd26bd0b03
 Use our interactive installer for the best experience:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/opensearch-project/observability-stack/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/uxmapp/observability-stack/main/install.sh | bash
 ```
 
 The installer will:
@@ -68,7 +68,7 @@ To get started manually with Docker Compose:
 
 ### 1️⃣ Clone the repository:
 ```bash
-git clone https://github.com/opensearch-project/observability-stack.git
+git clone https://github.com/uxmapp/observability-stack.git
 cd observability-stack
 ```
 
@@ -99,7 +99,7 @@ ___
 Deploy to any Kubernetes cluster using the umbrella Helm chart:
 
 ```bash
-git clone https://github.com/opensearch-project/observability-stack.git
+git clone https://github.com/uxmapp/observability-stack.git
 cd observability-stack
 helm install obs charts/observability-stack
 ```
@@ -499,7 +499,7 @@ ___
 
 The current configuration includes a custom OpenSearch Dockerfile (`docker-compose/opensearch/Dockerfile`) that removes some plugins facing issues during OpenSearch 3.5.0 development. This workaround will be removed once OpenSearch 3.5.0 is officially released and stabilized. At that point, we'll switch back to using the standard OpenSearch Docker image directly.
 
-Track progress: [OpenSearch 3.5.0 Release](https://github.com/opensearch-project/OpenSearch/releases)
+Track progress: [OpenSearch 3.5.0 Release](https://github.com/uxmapp/OpenSearch/releases)
 
 ## Query Language: PPL
 
@@ -547,8 +547,8 @@ This project is licensed under the Apache License 2.0 - see the LICENSE file for
 
 ## Support
 
-- **Issues**: Report bugs or request features via [GitHub Issues](https://github.com/opensearch-project/observability-stack/issues)
-- **Discussions**: Ask questions in [GitHub Discussions](https://github.com/opensearch-project/observability-stack/discussions)
+- **Issues**: Report bugs or request features via [GitHub Issues](https://github.com/uxmapp/observability-stack/issues)
+- **Discussions**: Ask questions in [GitHub Discussions](https://github.com/uxmapp/observability-stack/discussions)
 - **Documentation**: See the [docs/](docs/) directory
 
 ## Acknowledgments
