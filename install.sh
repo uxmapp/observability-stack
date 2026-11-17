@@ -2,14 +2,14 @@
 #
 # Observability Stack Installer
 # Downloads and runs the interactive TUI installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/opensearch-project/observability-stack/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/uxmapp/observability-stack/main/install.sh | bash
 #
 
 set -e
 set -o pipefail
 
 # Configuration
-REPO_URL="https://github.com/opensearch-project/observability-stack.git"
+REPO_URL="https://github.com/uxmapp/observability-stack.git"
 TEMP_DIR=$(mktemp -d)
 SIMULATE_MODE=false
 SKIP_PULL=false
@@ -85,9 +85,9 @@ cleanup() {
             echo "  1. Check logs: cat $log_file"
             echo "  2. Verify Docker is running: docker info"
             echo "  3. Check disk space: df -h"
-            echo "  4. Visit: https://github.com/opensearch-project/observability-stack/issues"
+            echo "  4. Visit: https://github.com/uxmapp/observability-stack/issues"
         else
-            print_info "For help, visit: https://github.com/opensearch-project/observability-stack/issues"
+            print_info "For help, visit: https://github.com/uxmapp/observability-stack/issues"
         fi
     fi
     
@@ -781,7 +781,7 @@ print_summary() {
     echo ""
     echo -e "${PURPLE}${BOLD}Next Steps:${RESET}"
     echo -e "  1. Learn more at ${PURPLE}https://observability.opensearch.org${RESET}"
-    echo -e "  2. For support, open an issue at ${PURPLE}https://github.com/opensearch-project/observability-stack/issues${RESET}"
+    echo -e "  2. For support, open an issue at ${PURPLE}https://github.com/uxmapp/observability-stack/issues${RESET}"
 
     echo ""
     echo -e "${GREEN}${ARROW}${RESET} ${BOLD}UI:${RESET}        OpenSearch Dashboards  ${BOLD}${OPENSEARCH_DASHBOARDS_PROTOCOL}://${OPENSEARCH_DASHBOARDS_HOST}:${OPENSEARCH_DASHBOARDS_PORT}${RESET}"
@@ -956,7 +956,7 @@ run_aws_installer() {
         exit 1
     fi
 
-    npx -y @opensearch-project/observability-stack "${AWS_CLI_ARGS[@]}"
+    npx -y @uxmapp/observability-stack "${AWS_CLI_ARGS[@]}"
 }
 
 main() {
