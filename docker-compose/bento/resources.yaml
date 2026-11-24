@@ -27,3 +27,19 @@ processor_resources:
                 client_secret: "${DELL_CLIENT_SECRET}"
         # Save the API array response into a temporary working variable
         result_map: 'root.tmp_dell = this'
+        
+  - label: lenovo_api_processor
+    branch:
+        processors:
+          - http:
+              url: 'https://supportapi.lenovo.com/v2.5/warranty?Serial=${! json("_source.device.serial_number") }'
+              verb: GET
+              rate_limit: api_rate_limiter
+              # dump_request_log_level: INFO
+              
+              # Lenovo Authentication: Use a static ClientID header
+              headers:
+                ClientID: "${LENOVO_CLIENT_ID}"
+          
+        # Save the API array response into a temporary working variable
+        result_map: 'root.tmp_lenovo = this.catch({})'
