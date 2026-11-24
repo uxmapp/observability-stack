@@ -5,7 +5,7 @@ import * as path from 'path';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
-import { IngestionPipeline } from './ingestion-pipeline';
+import { IngestionPipeline, EVALUATION_INDEX, EVALUATION_TEMPLATE_JSON, evaluationPolicyJson } from './ingestion-pipeline';
 import { OpenSearchAppConstruct } from './opensearch-app';
 import { DemoWorkload } from './demo-workload';
 import { InfraStack } from './infra-stack';
@@ -17,6 +17,8 @@ export interface ObservabilityStackProps extends cdk.StackProps {
   enableDemo?: boolean;
   /** IAM role ARNs mapped to all_access and security_manager and made OpenSearch UI admins, e.g. the roles people use to open Dashboards. */
   adminRoleArns?: string[];
+  /** Days before evaluation result indices are deleted on a managed domain (default 7; 0 keeps them). */
+  evaluationRetentionDays?: number;
 }
 
 export class ObservabilityStack extends cdk.Stack {
@@ -39,6 +41,7 @@ export class ObservabilityStack extends cdk.Stack {
 
     // FGAC role mapping (managed domains only — serverless uses IAM)
     let fgacMapping: cdk.CustomResource | undefined;
+    let fgacProvider: cr.Provider | undefined;
     if (!isServerless) {
       const fgacFn = new NodejsFunction(this, 'FgacMappingFn', {
         runtime: Runtime.NODEJS_22_X,
@@ -49,13 +52,40 @@ export class ObservabilityStack extends cdk.Stack {
         bundling: { externalModules: ['@aws-sdk/credential-provider-node'] },
       });
 
-      const fgacProvider = new cr.Provider(this, 'FgacProvider', { onEventHandler: fgacFn });
+      fgacProvider = new cr.Provider(this, 'FgacProvider', { onEventHandler: fgacFn });
       fgacMapping = new cdk.CustomResource(this, 'FgacMapping', {
         serviceToken: fgacProvider.serviceToken,
         properties: {
           OpenSearchEndpoint: infra.domainEndpoint,
           RoleArns: JSON.stringify([infra.pipelineRoleArn, uiInitRole.roleArn, ...(props.adminRoleArns ?? [])]),
           Region: this.region,
+        },
+      });
+    }
+
+    // GenAI evaluation index (managed only): rollover policy, template and write alias. Serverless
+    // collections have no ISM or aliases; the pipeline creates the index there.
+    let evalIndex: cdk.CustomResource | undefined;
+    if (!isServerless) {
+      const evalIndexFn = new NodejsFunction(this, 'EvalIndexFn', {
+        runtime: Runtime.NODEJS_22_X,
+        handler: 'handler',
+        entry: path.join(__dirname, '..', 'custom-resources', 'eval-index', 'index.ts'),
+        timeout: cdk.Duration.minutes(10),
+        role: iam.Role.fromRoleArn(this, 'EvalIndexAdminRole', infra.fgacAdminRoleArn, { mutable: false }),
+        bundling: { externalModules: ['@aws-sdk/credential-provider-node'] },
+      });
+      const evalIndexProvider = new cr.Provider(this, 'EvalIndexProvider', { onEventHandler: evalIndexFn });
+      evalIndex = new cdk.CustomResource(this, 'EvalIndex', {
+        serviceToken: evalIndexProvider.serviceToken,
+        properties: {
+          OpenSearchEndpoint: infra.domainEndpoint,
+          Region: this.region,
+          Alias: EVALUATION_INDEX,
+          TemplateName: `${EVALUATION_INDEX}-index-template`,
+          PolicyId: `${EVALUATION_INDEX}-policy`,
+          Template: EVALUATION_TEMPLATE_JSON,
+          Policy: evaluationPolicyJson(props.evaluationRetentionDays),
         },
       });
     }
@@ -71,6 +101,11 @@ export class ObservabilityStack extends cdk.Stack {
       maxOcu: props.maxOcu ?? 4,
       serverless: isServerless,
     });
+
+    // The pipeline's sink would otherwise create a plain index with the alias name first.
+    if (evalIndex) {
+      pipeline.node.addDependency(evalIndex);
+    }
 
     // OpenSearch Application + UI init
     const app = new OpenSearchAppConstruct(this, 'OpenSearchApp', {
@@ -91,7 +126,29 @@ export class ObservabilityStack extends cdk.Stack {
     }
 
     if (props.enableDemo ?? false) {
-      new DemoWorkload(this, 'DemoWorkload', { pipeline });
+      const demo = new DemoWorkload(this, 'DemoWorkload', {
+        pipeline,
+        opensearch: {
+          serverless: isServerless,
+          // Collection endpoints include the scheme; domain endpoints do not.
+          url: isServerless ? infra.domainEndpoint : `https://${infra.domainEndpoint}`,
+          arn: infra.domainArn,
+          collectionName: infra.collectionName,
+        },
+      });
+      // The eval canary reads agent spans. Managed domains map the demo role to readall.
+      if (fgacProvider) {
+        const demoFgac = new cdk.CustomResource(this, 'DemoFgacMapping', {
+          serviceToken: fgacProvider.serviceToken,
+          properties: {
+            OpenSearchEndpoint: infra.domainEndpoint,
+            RoleArns: JSON.stringify([demo.role.roleArn]),
+            Region: this.region,
+            FgacRoles: JSON.stringify(['readall']),
+          },
+        });
+        demo.instance.node.addDependency(demoFgac);
+      }
     }
 
     new cdk.CfnOutput(this, 'OpenSearchEndpoint', { value: infra.domainEndpoint });

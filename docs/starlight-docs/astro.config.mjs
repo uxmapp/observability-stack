@@ -277,6 +277,7 @@ export default defineConfig({
 						{ label: 'Framework Integrations', link: '/send-data/ai-agents/integrations/' },
 						{ label: 'Agent Tracing', link: '/ai-observability/agent-tracing/' },
 						{ label: 'Agent Graph & Path', link: '/ai-observability/agent-tracing/graph/' },
+						{ label: 'Example Agents', link: '/ai-observability/examples/' },
 					],
 				},
 				{
@@ -284,7 +285,10 @@ export default defineConfig({
 					collapsed: true,
 					items: [
 						{ label: 'Overview', link: '/agent-evals/' },
+						{ label: 'Quickstart', link: '/agent-evals/quickstart/' },
 						{ label: 'Evaluation & Scoring', link: '/agent-evals/evaluation/' },
+						{ label: 'Run Evaluations in CI', link: '/agent-evals/ci/' },
+						{ label: 'Data Model & Ingestion', link: '/agent-evals/data-model/' },
 						{ label: 'Evaluation Integrations', link: '/agent-evals/evaluation-integrations/' },
 					],
 				},
@@ -329,6 +333,7 @@ export default defineConfig({
 										{ label: 'Line Chart', link: '/dashboards/visualize/line-chart/' },
 										{ label: 'Metric Chart', link: '/dashboards/visualize/metric-chart/' },
 										{ label: 'Pie Chart', link: '/dashboards/visualize/pie-chart/' },
+										{ label: 'Sankey Chart', link: '/dashboards/visualize/sankey-chart/' },
 										{ label: 'Scatter Plot', link: '/dashboards/visualize/scatter-chart/' },
 										{ label: 'State Timeline', link: '/dashboards/visualize/state-timeline-chart/' },
 										{ label: 'Table', link: '/dashboards/visualize/table-chart/' },

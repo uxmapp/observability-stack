@@ -57,6 +57,8 @@ cdk deploy --all -c adminRoleArns=arn:aws:iam::123456789012:role/Admin
 
 `cdk synth` warns when `adminRoleArns` is empty.
 
+On a managed domain, evaluation result indices (`otel-v1-genai-evaluation-*`) are deleted after 7 days. Change it with `-c evaluationRetentionDays=<days>`; `0` keeps them.
+
 Each role in `adminRoleArns` also needs data-plane permissions in its own IAM policy: `es:ESHttp*` on the domain (managed) or `aoss:APIAccessAll` on the collection (serverless). The domain access policy and the serverless data access policy admit the role, but don't grant those IAM actions.
 
 On serverless, the collection's data access policy lists the OSIS pipeline role, the UI init role and `adminRoleArns`. Removing a role from `adminRoleArns` and redeploying removes its FGAC mappings, application admin entry and data access.
@@ -83,6 +85,16 @@ The group's indexing and search capacity defaults to 0 to 16 OCU. The demo workl
 ```bash
 cdk deploy --all -c opensearchType=serverless -c aossMinOcu=1 -c aossMaxOcu=8
 ```
+
+### Stack names
+
+The stacks are named `ObsInfra` and `ObservabilityStack`. To deploy a second copy next to an existing one in the same account and region, prefix both names:
+
+```bash
+cdk deploy --all -c stackNamePrefix=test-
+```
+
+This deploys `test-ObsInfra` and `test-ObservabilityStack`. Resource names derived from the stack name (pipeline, collection, application, Prometheus workspace alias) change with it. The OSIS pipeline is `obs-stack-<stack name>` lowercased when that fits in 28 characters; a longer name is cut and ends in a short hash of the full stack name, so different prefixes get different pipelines.
 
 ## Architecture
 
@@ -160,6 +172,8 @@ The IAM principal sending data needs `osis:Ingest` permission on the pipeline AR
 
 Unless you deploy with `-c enableDemo=false`, an EC2 instance launches running the [OpenTelemetry Demo](https://opentelemetry.io/docs/demo/) — a full e-commerce microservices app (~20 services) that generates realistic traces, logs, and metrics. Data flows through the OTel Collector → OSIS pipeline → OpenSearch + AMP.
 
+The instance also runs the example agents and the [agent eval canary](../../docker-compose/agent-eval-canary/README.md), which reads agent spans from the domain or collection with the instance role and sends evaluation results through the pipeline, so Agent Traces shows evaluations. The stack grants the instance role read access: read-only, and only on the span and evaluation indices (`otel-v1-apm-span*`, `otel-v1-genai-evaluation*`): `aoss:APIAccessAll` plus a data access policy with `aoss:DescribeIndex` and `aoss:ReadDocument` on serverless, or `es:ESHttpGet`/`es:ESHttpPost` on those index paths plus the `readall` FGAC role on a managed domain.
+
 ## Useful Commands
 
 ```bash
@@ -178,6 +192,9 @@ cdk destroy --all
 
 # Destroy only the app stack (keeps domain intact)
 cdk destroy ObservabilityStack
+
+# Unit tests (pipeline names, application admins, Agent Evaluations UI setup)
+npm test
 ```
 
 ## Project Structure
@@ -197,7 +214,7 @@ aws/cdk/
 │   ├── fgac-mapping/index.ts           # FGAC Security API role mapping
 │   ├── dqs-datasource/index.ts         # DQS Prometheus data source
 │   ├── opensearch-app/index.ts         # OpenSearch Application lifecycle
-│   └── ui-init/                        # Workspace, index patterns, dashboards
+│   └── ui-init/                        # Workspace, index patterns, Agent Evaluations config, dashboards
 │       ├── index.ts
 │       └── arch-image.mjs              # Architecture diagram (base64 PNG)
 ├── package.json

@@ -1,13 +1,13 @@
 [project]
 name = "agent-eval-canary"
-version = "0.1.0"
-description = "Periodically scores un-evaluated agent traces in OpenSearch"
+version = "0.3.0"
+description = "Deterministic online and offline evaluations of the example agents"
 requires-python = ">=3.10"
 dependencies = [
-    "opensearch-genai-observability-sdk-py[opensearch]>=0.2.7",
-    "opentelemetry-api",
-    "opentelemetry-sdk",
+    # 0.3.0: run names, judge context, scorer ownership
+    "opensearch-genai-observability-sdk-py[opensearch]>=0.3.0",
     "opentelemetry-exporter-otlp-proto-grpc",
+    "requests",
 ]
 
 [tool.uv]

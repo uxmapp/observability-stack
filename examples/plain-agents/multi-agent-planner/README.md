@@ -241,6 +241,8 @@ View in OpenSearch Dashboards (http://localhost:5601):
   - `gen_ai.bedrock.fallback` — true if Bedrock failed and agent used mock
   - `tool.fallback` — true if external API failed and MCP used mock data
   - `response.partial` — true if any sub-agent failed
+  - `gen_ai.conversation.id` — the session the turn belongs to
+  - `derived.gen_ai.is_root` — on the agent root span (`mark_agent_root()`)
 
 ## Trace Structure
 
@@ -272,6 +274,67 @@ travel-planner | POST /plan (3200ms)
 │   │       └── frankfurter exchange (140ms)           # Real ECB rates
 │   └── chat summarize (1000ms)                        # Bedrock: synthesize recommendation
 ```
+
+The `invoke_agent Travel Planner` span below `POST /plan` is the trace's agent root: it calls
+`mark_agent_root()` (`derived.gen_ai.is_root`), so Agent Traces lists the trace by it, and it is
+the only span that names the agent (the HTTP spans carry no `gen_ai.agent.name`). The weather and
+events agents mark their own agent span only when they are called directly (no caller trace).
+
+## SDK
+
+The agents use the [OpenSearch GenAI SDK](https://github.com/opensearch-project/genai-observability-sdk-py)
+(`register()`, `observe()`, `enrich()`, `mark_agent_root()`), 0.3.0 or later from PyPI. The MCP server uses plain OpenTelemetry.
+
+## Sessions
+
+`POST /plan` takes an optional `session_id` (`gen_ai.conversation.id`; generated when omitted),
+sets it on the planner's agent span, passes it to the weather and events agents and returns it.
+The canary sends each "deep" multi-destination comparison as one session, so Agent Traces shows
+multi-turn sessions and the [eval canary](../../../docker-compose/agent-eval-canary/README.md)
+grades each finished session.
+
+```bash
+curl -s localhost:8003/plan -H 'content-type: application/json' \
+  -d '{"destination": "Paris", "origin": "Seattle", "session_id": "demo-session-1"}'
+```
+
+## Application logs
+
+Each service sends its Python logs as OTel logs (a `LoggingHandler` on the LoggerProvider that
+`register()` installs), so every record carries the trace and span ids of the span that was active
+and Agent Traces shows it in the trace flyout (**Related logs**, and **Logs** on the span):
+
+| Level | When |
+|---|---|
+| INFO | normal steps: planning, sub-agent answers, MCP tool calls, plan ready |
+| WARN | fallbacks (Bedrock unavailable, tool fallback data, unknown currency), injected faults, degraded or wrong answers (partial plan, events for another city, no events, ungrounded weather answer, truncated response) |
+| ERROR | tool and sub-agent failures (tool errors, timeouts, HTTP errors) |
+
+The eval canaries log failed results and test cases at WARN on the evaluated span, so a failing
+evaluation and the agent's own WARN / ERROR logs sit on the same trace.
+
+## Two releases
+
+Compose runs the planner twice from the same image, with `AGENT_VERSION` picking the behavior:
+
+| Service | Version | Behavior |
+|---|---|---|
+| `travel-planner` | 1.3.0 (released) | asks the weather agent, then the events agent; no cost estimate |
+| `travel-planner-candidate` | 1.4.0 (candidate) | asks both in parallel, adds an `estimate_trip_cost` step when the request has a budget, and skips the forecast when it has no travel dates |
+
+The canary traffic generator sends `CANDIDATE_TRAFFIC_SHARE` (default 0.2) of new conversations to
+the candidate, so Agent Traces and the evaluations compare the two versions on the same kind of
+traffic. Requests read like real ones ("Plan 5 days in Rome in May under $2,500, flying from New
+York."); the planner reads the trip length, month and budget from them.
+
+## Evaluations
+
+With a local OpenSearch, the [agent eval canary](../../../docker-compose/agent-eval-canary/README.md)
+grades these agents with code checks (production checks per trace, conversation checks per
+session, and a scheduled "Trip planning regression" suite that compares the 1.3.0 release with the
+1.4.0 candidate), and the opt-in
+[LLM eval canary](../../../docker-compose/agent-eval-canary-llm/README.md) adds a Bedrock judge.
+Results are stored in `otel-v1-genai-evaluation`.
 
 ## Canary
 
